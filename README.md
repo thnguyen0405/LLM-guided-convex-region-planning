@@ -38,7 +38,6 @@ Definitions and prompt: [scoring details](convex-region-graph/QUERY_SCORING.md).
 ## Planner demo
 
 ```bash
-cd /Users/nguyen/BK/SEM7/DACN/DACN-main/sampling-based-path-finding-main-python
 source .venv/bin/activate
 python demo.py --replay outputs/flappy/brrt.json
 ```
