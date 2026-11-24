@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.cache/
+outputs/*
+!outputs/flappy/
+!outputs/hole/
+!outputs/narrow/
+!outputs/room/
+outputs/*/*
+!outputs/*/brrt.json
+!outputs/*/brrt.png
+!outputs/*/brrt.svg
+!outputs/*/summary.json

@@ -1,0 +1,3 @@
+# Planner algorithms use only the Python standard library.
+# Matplotlib provides the native demo window and PNG/SVG export.
+matplotlib>=3.9,<4

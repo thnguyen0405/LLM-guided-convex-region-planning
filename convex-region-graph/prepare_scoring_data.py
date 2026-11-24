@@ -14,6 +14,13 @@ from collections import deque
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / 'structural_scoring_config.json'
+PORTAL_RULE_DEFAULTS = {
+    'portal_1d': {'rule': 'region_intersection_dimension_equals_one',
+                  'length_tolerance': 1e-9, 'area_tolerance': 1e-9},
+    'short_safe_portal': {
+        'rule': 'decreasing_membership_of_safe_portal_length_for_1d_intersection',
+        'threshold': None, 'softness': None},
+}
 
 
 def digest(path):
@@ -27,6 +34,21 @@ def load_config(path=DEFAULT_CONFIG, k=None):
     if type(config['k']) is not int or config['k'] < 1:
         raise ValueError('k must be a positive integer')
     rules = config['label_rules']
+    # Older custom configuration files acquire explicit, uncalibrated defaults.
+    for name, default in PORTAL_RULE_DEFAULTS.items():
+        rules.setdefault(name, deepcopy(default))
+        if rules[name].get('rule') != default['rule']:
+            raise ValueError(f'Unsupported {name} rule')
+    for key in ('length_tolerance', 'area_tolerance'):
+        value = rules['portal_1d'][key]
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f'portal_1d.{key} must be finite and positive')
+    threshold, softness = (rules['short_safe_portal'][key] for key in ('threshold', 'softness'))
+    if (threshold is None) != (softness is None):
+        raise ValueError('Set both short_safe_portal threshold and softness, or leave both null')
+    if threshold is not None and any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
+                                     for v in (threshold, softness)):
+        raise ValueError('short_safe_portal threshold and softness must be finite and positive')
     if not 0 <= rules['active_at'] <= rules['very_at'] <= 1:
         raise ValueError('Require 0 <= active_at <= very_at <= 1')
     for name in ('open', 'corridor', 'junction', 'narrow', 'critical'):
@@ -271,6 +293,71 @@ def optional_positive(value):
     return value
 
 
+def intersection_geometry(left, right, settings):
+    """Classify the supplied region intersection without altering its polygons.
+
+    Use the graph builder's collinearity tolerance for rounded shared edges:
+    exact GEOS intersections can collapse these to a point or an empty set.
+    A positive-area overlap above the configured area tolerance takes priority.
+    The safe-portal segment alone is never evidence about intersection dimension.
+    """
+    from shapely.geometry import Polygon
+    from shapely.errors import GEOSException
+    from build_graph import shared_portal
+
+    try:
+        polygons = []
+        for vertex in (left, right):
+            raw = vertex['polygon']
+            if len(raw) < 3 or not all(finite_point(p) for p in raw):
+                raise ValueError('requires finite region polygons with at least three vertices')
+            points = [tuple(float(v) for v in p) for p in raw]
+            shape = Polygon(points)
+            if not shape.is_valid or shape.is_empty or shape.area <= 0:
+                raise ValueError('requires valid, positive-area region polygons')
+            polygons.append((points, shape))
+        overlap = polygons[0][1].intersection(polygons[1][1])
+        area = overlap.area
+        if area > settings['area_tolerance']:
+            return {'dimension': 2, 'method': 'polygon_intersection_area',
+                    'area': area, 'shared_boundary_length': None}
+        portal = shared_portal(polygons[0][0], polygons[1][0], settings['length_tolerance'])
+        if portal is not None and math.dist(*portal) > settings['length_tolerance']:
+            return {'dimension': 1, 'method': 'shared_boundary_with_graph_tolerance',
+                    'area': area, 'shared_boundary_length': math.dist(*portal)}
+        if not overlap.is_empty and overlap.length > settings['length_tolerance']:
+            return {'dimension': 1, 'method': 'polygon_intersection_length',
+                    'area': area, 'shared_boundary_length': overlap.length}
+        return {'dimension': -1 if overlap.is_empty else 0,
+                'method': 'polygon_intersection_empty' if overlap.is_empty else 'polygon_intersection_point',
+                'area': area, 'shared_boundary_length': None}
+    except (KeyError, TypeError, ValueError, GEOSException) as error:
+        return {'dimension': None, 'method': 'unavailable', 'area': None,
+                'shared_boundary_length': None,
+                'reason': f'Cannot determine region-intersection dimension: {error}'}
+
+
+def portal_memberships(geometry, length, config):
+    """Keep dimensional type, retained segment length and narrowness separate."""
+    dimension = geometry['dimension']
+    type_value = None if dimension is None else float(dimension == 1)
+    labels = {'portal_1d': membership(type_value, config, geometry.get('reason'))}
+    rule = config['label_rules']['short_safe_portal']
+    if dimension is None:
+        value, reason = None, geometry.get('reason')
+    elif dimension != 1:
+        value, reason = 0.0, None
+    elif rule['threshold'] is None or rule['softness'] is None:
+        value = None
+        reason = ('Requires explicit short_safe_portal threshold and softness in input map length units; '
+                  'no default calibration is assumed.')
+    else:
+        value = sigmoid(length, rule['threshold'], rule['softness'], decreasing=True)
+        reason = None
+    labels['short_safe_portal'] = membership(value, config, reason)
+    return labels
+
+
 def prepare(graph, config, map_name='custom'):
     vertices, adjacency, edges = weighted_graph(graph)
     starts = endpoint_regions(graph, 'start', vertices)
@@ -366,13 +453,18 @@ def prepare(graph, config, map_name='custom'):
     connections = []
     for a, b in sorted({edge_key(a, b) for a, b in edges}):
         original = edges.get((a, b), edges.get((b, a)))
+        geometry = intersection_geometry(vertices[a], vertices[b], rules['portal_1d'])
+        safe_length = math.dist(*original['safe_portal'])
         fraction = sum(any(edge_key(u, v) == (a, b) for u, v in zip(p, p[1:])) for p in paths) / count if count else None
         mandatory = not set(goals).intersection(reachable(adjacency, starts, {(a, b), (b, a)})) if count else None
         # Current shared-boundary portals are line segments, not full-dimensional
         # intersections with a positive inscribed-ball radius. Do not use W/2.
         inradius = optional_positive(original.get('intersection_inscribed_ball_radius'))
+        if geometry['dimension'] == 1 and inradius is not None:
+            raise ValueError(f'Connection {a}-{b}: a 1D intersection cannot have a positive 2D intersection inradius')
         width = inradius / robot_radius if inradius is not None and robot_radius else None
         labels = {
+            **portal_memberships(geometry, safe_length, config),
             'narrow': membership(sigmoid(width, rules['narrow']['threshold'], rules['narrow']['softness'], True)
                                  if width is not None else None, config,
                                  'Requires full-dimensional intersection_inscribed_ball_radius; a 1D safe portal length is not that radius.'),
@@ -389,6 +481,11 @@ def prepare(graph, config, map_name='custom'):
                             'safe_portal_midpoint': original['safe_portal_midpoint'],
                             'weight': original['weight'],
                             'structural_features': {'sequence_fraction': fraction,
+                                'intersection_dimension': geometry['dimension'],
+                                'intersection_dimension_method': geometry['method'],
+                                'intersection_area': geometry['area'],
+                                'shared_boundary_length': geometry['shared_boundary_length'],
+                                'safe_portal_length': safe_length,
                                 'on_any_simple_start_goal_path': (a, b) in route_edges if reciprocal and count else None,
                                 'in_all_returned_sequences': fraction == 1 if count else None,
                                 'mandatory_on_all_start_goal_paths': mandatory,
@@ -418,6 +515,8 @@ def prepare(graph, config, map_name='custom'):
                 'All-path mandatory flags use graph reachability after deleting both directions of the connection.',
                 'No class-2 labels, online feedback, Bayes, Thompson sampling, or planner integration.',
                 'Inscribed geometry is used only when explicitly supplied; no covariance or clearance substitution.',
+                'portal_1d is a geometric type, not a narrowness or feasibility judgment.',
+                'short_safe_portal uses retained segment length, not a 2D inradius; calibration defaults are null.',
                 'Alternative-route labels test all simple routes edge-disjoint from the best sequence on reciprocal graphs.']}
 
 

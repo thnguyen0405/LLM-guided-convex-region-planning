@@ -10,6 +10,16 @@
     "dead_end": {"degree": 1, "exclude_endpoint_regions": true},
     "pocket": {"rule": "endpoint_free_side_of_bridge_in_endpoint_component"},
     "narrow": {"threshold": 2.0, "softness": 0.3},
+    "portal_1d": {
+      "rule": "region_intersection_dimension_equals_one",
+      "length_tolerance": 1e-9,
+      "area_tolerance": 1e-9
+    },
+    "short_safe_portal": {
+      "rule": "decreasing_membership_of_safe_portal_length_for_1d_intersection",
+      "threshold": null,
+      "softness": null
+    },
     "critical": {"threshold": 0.8, "softness": 0.05},
     "alternative_route": {"rule": "simple_path_edge_disjoint_from_best_sequence"}
   },
@@ -18,6 +28,9 @@
     "region_width": "maximum_inscribed_ball_radius / robot_radius",
     "corridor_elongation": "maximum_inscribed_ellipsoid_axis_ratio; not covariance aspect_ratio",
     "portal_width": "full_dimensional_intersection_inscribed_ball_radius / robot_radius",
+    "portal_1d": "region intersection is one-dimensional under configurable numerical geometry tolerances; not a narrowness or feasibility judgment",
+    "safe_portal_length": "Euclidean length of the retained safe_portal segment in input map length units; not a 2D inradius",
+    "short_safe_portal": "for a 1D region intersection only: sigmoid((threshold - safe_portal_length) / softness); unavailable until threshold and softness are explicitly configured",
     "sequence_fraction": "occurrences / actual_number_of_returned_sequences",
     "all_paths_mandatory": "removing this connection disconnects every start-region/goal-region pair",
     "degree": "number of unique neighbors in the retained undirected connection graph"
@@ -26,7 +39,7 @@
   "pending_agreement": [
     "Supervisor approval of structural thresholds and soft-label interpretation",
     "Acquisition of exact region inradii and inscribed ellipsoid axes",
-    "Definition of portal width membership for 1D shared-boundary portals",
-    "Calibration examples for query-priority integer scores; no additive scoring weights are prescribed"
+    "Supervisor agreement on short_safe_portal threshold and softness in input map length units; defaults are null",
+    "Calibration examples for query-priority scores in [0,1]; LLM directly selects query-specific priority scores under query_priority_rubric.json"
   ]
 }

@@ -1,0 +1,39 @@
+{
+  "schema": "query-priority-rubric/v1",
+  "range": [
+    0,
+    1
+  ],
+  "label_names": [
+    "open",
+    "corridor",
+    "junction",
+    "dead_end",
+    "pocket",
+    "narrow",
+    "portal_1d",
+    "short_safe_portal",
+    "critical",
+    "alternative_route"
+  ],
+  "anchors": {
+    "0": "Lowest query priority, not a feasibility rejection",
+    "0.5": "Neutral or mixed query priority",
+    "1": "Highest query priority, not a safety guarantee"
+  },
+  "constraints": [
+    "Python computes all class-1 features and memberships; LLM cannot relabel",
+    "Inactive memberships are not missing; missing memberships are excluded, not replaced with zero",
+    "portal_1d is a type, not evidence of narrowness or low priority",
+    "Top-k frequency is not all-path necessity",
+    "Never remove retained regions or connections because of a low score"
+  ],
+  "status": "Experimental scoring policy; not calibrated or validated by planner outcomes",
+  "pending_agreement": [
+    "Supervisor review of score anchors and calibration examples",
+    "Evaluation on held-out map/query pairs",
+    "Stability and factual accuracy of LLM scores across repeated runs"
+  ],
+  "score_source": "llm_direct_query_priority",
+  "scoring_policy": "LLM directly assigns each region/connection one priority score in [0,1] and a short reason from graph topology, start/goal, sequences, available features and Python-computed class-1 labels. No separate per-label weights or arithmetic score aggregation."
+}

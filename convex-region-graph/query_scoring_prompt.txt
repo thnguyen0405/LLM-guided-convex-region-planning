@@ -3,8 +3,9 @@ supporting a start-goal planning query, using supplied graph structure and
 Python-computed class-1 labels. This is not the old local-geometric-suitability
 score, not a probability, not a trajectory, and not a collision-free guarantee.
 
-The input contains the query, retained graph adjacency, best region sequences,
-label vocabulary, the target item, and its relevant numeric/structural features.
+The input contains start/goal, the full retained graph's nodes and connections,
+directed adjacency, numeric class-1 memberships, label definitions and best
+region sequences. Target requests also contain the target's complete features.
 Use the graph to understand how the target connects start and goal, whether
 there are alternatives, and what trade-offs are visible. Sequence costs are
 centroid-to-safe-portal-midpoint distances, not robot path costs.
@@ -16,6 +17,14 @@ An inactive label is different from an unavailable label. You may score using
 available evidence despite partial class-1 data; disclose relevant limitations
 briefly. If the supplied evidence cannot support a score, use insufficient_data.
 
+portal_1d describes a one-dimensional intersection of the two supplied regions
+under the configured numerical geometry tolerances. It does not mean narrow,
+short, difficult, infeasible or low priority. short_safe_portal is a separate
+Python-computed membership based on the retained safe segment's length in map
+units. When its threshold/softness are null, that membership is unavailable:
+do not infer it or choose a cutoff. Neither label supplies a 2D intersection
+inradius, and half a portal length must never replace that radius in narrow.
+
 Interpret critical membership and in_all_returned_sequences only relative to
 the actual returned sequences. Only mandatory_on_all_start_goal_paths reports
 the all-path graph test. Absence from the returned k sequences does not prove
@@ -25,22 +34,35 @@ a comfortable region can be a low-priority side branch. Do not penalize
 missing label values as if they were bad geometry. Do not invent visited,
 failure, coverage, stagnation, or any class-2 state: there are no running trees.
 
-RUBRIC (PROVISIONAL, NEEDS SUPERVISOR AGREEMENT)
-Return an integer 0..10, higher meaning greater priority for this query.
-Assess the target's documented start-goal structural relevance, alternatives,
-and supplied geometric constraints qualitatively. There are no agreed additive
-weights, bonus/penalty rules, numeric feature cutoffs, or calibration examples.
-Do not claim any such formula or cutoffs exist. Exact score calibration and the
-trade-off between route relevance and local geometry remain to be agreed.
-These scores are exploratory LLM judgments, not validated reference labels.
+SCORING POLICY: ALL NUMBERS ARE IN [0,1]
+Follow context.scoring_rubric. The policy is experimental, not calibrated.
+0 means lowest query priority, 0.5 neutral/mixed, 1 highest query priority.
+These are preferences, not feasibility decisions, loss values or probabilities.
+
+TASK query_region_priority or query_connection_priority:
+YOU directly choose the FINAL score in [0,1] and explain it briefly. Use the
+retained graph, start/goal, the target's actual structural role, alternatives,
+all-path graph tests, sequences, costs and available geometry together with
+its Python-computed labels. Labels alone do not settle priority: same-label
+targets can receive different scores when the graph evidence justifies it.
+Explain the target's score using supplied graph evidence and labels. Do not invent fixed
+additive coefficients, bonuses, penalties, thresholds or a scoring formula.
+No such numeric combination has been agreed by the group.
+
+Python does not choose, blend, normalize or recompute your score. It only
+validates the response and stores your score unchanged. Return exactly
+{"status":"scored","score":0.8,"reason":"Brief graph- and label-based explanation."}
+The example value illustrates the format, not a prescribed score.
+If supplied evidence is insufficient, return
+{"status":"insufficient_data","score":null,"reason":"Explain missing evidence."}
+Missing memberships are not zero or bad geometry; use the available graph
+context without inventing those missing labels.
 
 Never remove a region/connection because its score is low. Never override
 geometric feasibility or claim a sequence is certified safe. Only retained
 connections are provided. If query.status is not connected, report
 insufficient_data with score null; do not invent a route.
 
-Return ONLY JSON: {"status":"scored","score":7,"reason":"Short evidence-based explanation."}
-The reason must be one or two concise sentences, at most 45 words and at most
-320 characters. Do not repeat all supplied measurements or the task instructions.
-Allowed status: scored or insufficient_data. For insufficient_data, score is null.
-Do not return or modify labels, IDs, weights, portals, or topology.
+Return ONLY the requested JSON, with no markdown. Do not return per-label weights. Each reason must be one
+or two concise sentences, at most 45 words and at most 320 characters.
+Do not modify labels, IDs, portals or topology. Do not output class-2 labels.

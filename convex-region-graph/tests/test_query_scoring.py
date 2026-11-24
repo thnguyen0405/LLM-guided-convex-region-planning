@@ -1,16 +1,19 @@
 """Query preparation and scoring contract tests; no Ollama server required."""
 from copy import deepcopy
 import itertools
+import io
 import json
 import math
 from pathlib import Path
 import random
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from prepare_scoring_data import (load_config, prepare, prepare_file, query_paths,
     path_cost, sigmoid, weighted_graph, yen_paths)
-from score_maps import score_map, score_prepared, validate_answer, explanation_review_flags
+from score_maps import (score_map, score_prepared, validate_answer, explanation_review_flags,
+                        LABEL_NAMES, ask_ollama, context_for)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -191,35 +194,57 @@ class StructuralLabelTests(unittest.TestCase):
 
 
 class ScoringContractTests(unittest.TestCase):
+    def test_wire_schema_requests_only_one_priority_score(self):
+        data = prepare(graph_for([('S', 'G')]), load_config())
+        answer = {'status': 'scored', 'score': .7, 'reason': 'Graph evidence.'}
+        response = io.StringIO(json.dumps({'message': {'content': json.dumps(answer)}}))
+        with patch('score_maps.urlopen', return_value=response) as server:
+            result = ask_ollama('query_region_priority', {'context': context_for(data), 'item': data['regions'][0]})
+        request = json.loads(server.call_args.args[0].data)
+        self.assertEqual(set(request['format']['properties']), {'status', 'score', 'reason'})
+        self.assertTrue(request['messages'][1]['content'].startswith('{"context":'))
+        self.assertEqual(result, answer)
+
+    def test_truncated_model_output_or_context_is_never_accepted(self):
+        data = prepare(graph_for([('S', 'G')]), load_config())
+        for metadata in ({'done_reason': 'length'}, {'prompt_eval_count': 32768}):
+            response = io.StringIO(json.dumps({**metadata, 'message': {'content': '{}'}}))
+            with patch('score_maps.urlopen', return_value=response):
+                with self.assertRaises(ValueError):
+                    ask_ollama('query_region_priority', {'context': context_for(data)})
+
     def test_explanation_flags_do_not_relabel_or_change_scores(self):
         data = prepare(graph_for([('S','G')]), load_config())
         edge = deepcopy(data['connections'][0])
         original = deepcopy(edge)
-        answer = {'status':'scored','score':7,'reason':'This connection is a junction.'}
+        answer = {'status':'scored','score':0.7,'reason':'This connection is a junction.'}
         flags = explanation_review_flags(answer, edge, connection=True)
         self.assertTrue(any('junction' in flag for flag in flags))
         self.assertEqual(edge, original)
-        self.assertEqual(answer['score'],7)
+        self.assertEqual(answer['score'],0.7)
         answer['reason']='No narrow label is available.'
         self.assertEqual(explanation_review_flags(answer,edge,connection=True),[])
 
     def test_validation_rejects_invalid_responses(self):
         for answer in [{'status':'scored','score':True,'reason':'x'},
-                       {'status':'scored','score':11,'reason':'x'},
+                       {'status':'scored','score':1.1,'reason':'x'},
+                       {'status':'scored','score':-0.1,'reason':'x'},
+                       {'status':'scored','score':math.nan,'reason':'x'},
+                       {'status':'scored','score':math.inf,'reason':'x'},
                        {'status':'infeasible','score':None,'reason':'x'},
                        {'status':'insufficient_data','score':0,'reason':'x'},
-                       {'status':'scored','score':7,'reason':'x','labels':['open']}]:
+                       {'status':'scored','score':0.7,'reason':'x','labels':['open']}]:
             with self.assertRaises(ValueError):
                 validate_answer(answer)
         with self.assertRaises(ValueError):
-            validate_answer({'status':'scored','score':7,'reason':'x'*321})
+            validate_answer({'status':'scored','score':0.7,'reason':'x'*321})
 
     def test_context_identity_checkpoint_and_resume(self):
         data = prepare(graph_for([('S','G')]),load_config())
         calls = []
         def fake(task, payload, **kwargs):
             calls.append((task,payload))
-            return {'status':'scored','score':6,'reason':'Structural evidence only; missing width labels.'}
+            return {'status':'scored','score':0.6,'reason':'Structural evidence only; missing width labels.'}
         with tempfile.TemporaryDirectory() as directory:
             output=Path(directory)/'scores.json'
             result=score_prepared(data,output=output,request_fn=fake)
@@ -227,6 +252,14 @@ class ScoringContractTests(unittest.TestCase):
             self.assertEqual(result['status'],'complete')
             self.assertIn('sequences',calls[0][1]['context'])
             self.assertIn('memberships',calls[0][1]['item'])
+            graph = calls[0][1]['context']['graph']
+            self.assertEqual({n['id'] for n in graph['nodes']}, {'S', 'G'})
+            self.assertEqual(len(graph['connections']), 1)
+            self.assertNotIn('label_assessment', result)
+            self.assertTrue(all(task != 'query_label_weights' for task, _ in calls))
+            self.assertEqual(result['score_range'], [0, 1])
+            for record in result['regions'] + result['edges']:
+                self.assertTrue(0 <= record['score'] <= 1)
             score_prepared(data,output=output,resume=True,request_fn=fake)
             self.assertEqual(len(calls),3)
             with self.assertRaises(ValueError):
@@ -247,19 +280,45 @@ class ScoringContractTests(unittest.TestCase):
             calls.append(task)
             if len(calls)==2:
                 raise ConnectionError('Simulated interrupted request')
-            return {'status':'scored','score':5,'reason':'A retained query connection.'}
+            return {'status':'scored','score':0.5,'reason':'A retained query connection.'}
         with tempfile.TemporaryDirectory() as directory:
             output=Path(directory)/'scores.json'
             with self.assertRaises(ConnectionError):
                 score_prepared(data,output=output,request_fn=interrupted)
             checkpoint=json.loads(output.read_text())
             self.assertEqual(len(checkpoint['regions']),1)
-            def success(*args,**kwargs):
-                return {'status':'scored','score':5,'reason':'A retained query connection.'}
+            def success(task, payload, **kwargs):
+                return {'status':'scored','score':0.5,'reason':'A retained query connection.'}
             result=score_prepared(data,output=output,resume=True,request_fn=success)
             self.assertEqual(len(result['regions']),2)
             self.assertEqual(len(result['edges']),1)
             self.assertEqual(result['status'],'complete')
+
+    def test_final_scores_are_saved_exactly_as_returned_by_llm(self):
+        data = prepare(graph_for([('S', 'G')]), load_config())
+        before = deepcopy(data)
+        expected = iter([0.123456789, 0.901234567, 0.41])
+        def fake(task, payload, **kwargs):
+            self.assertIn('graph', payload['context'])
+            self.assertNotIn('label_assessment', payload['context'])
+            return {'status': 'scored', 'score': next(expected), 'reason': 'LLM decision from graph context.'}
+        with tempfile.TemporaryDirectory() as directory:
+            result = score_prepared(data, output=Path(directory)/'scores.json', request_fn=fake)
+        self.assertEqual([r['score'] for r in result['regions']+result['edges']], [0.123456789, 0.901234567, 0.41])
+        self.assertEqual(result['score_source'], 'llm_direct_query_priority')
+        self.assertTrue(all('score_components' not in r for r in result['regions']+result['edges']))
+        self.assertEqual(data, before)
+
+    def test_old_integer_checkpoint_is_protected_even_without_resume(self):
+        data = prepare(graph_for([('S', 'G')]), load_config())
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'old.json'
+            original = json.dumps({'schema': 'query-priority-scores/v1', 'regions': [{'score': 7}]})
+            output.write_text(original)
+            for resume in (True, False):
+                with self.assertRaisesRegex(ValueError, 'Old score artifact protected'):
+                    score_prepared(data, output=output, resume=resume)
+            self.assertEqual(output.read_text(), original)
 
 
 if __name__ == '__main__':

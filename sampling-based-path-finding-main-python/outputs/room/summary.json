@@ -1,0 +1,16 @@
+[
+  {
+    "success": true,
+    "path_valid": true,
+    "iterations": 4413,
+    "nodes_added": 806,
+    "planning_time": 2.551753416999418,
+    "time_to_first_solution": 2.5515415420013596,
+    "algorithm_cost": 85.54825728256141,
+    "path_length": 62.12567559471619,
+    "stop_reason": "first_solution",
+    "planner": "brrt",
+    "sampling": "uniform",
+    "seed": 42
+  }
+]
